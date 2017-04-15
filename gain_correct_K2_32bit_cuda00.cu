@@ -25,7 +25,7 @@ int main(int argc, char *argv[])
 {
     char *raw_name,*out_name,*gain_name;
     FILE *file,*gain;
-    int threads;
+    //int threads;
     MrcHeader *inhead;
 
     raw_name=(char *)malloc(NAME*sizeof(char));
@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
 
     inhead=(MrcHeader *)malloc(sizeof(MrcHeader));
 
-    if(argc!=5)
+    if(argc!=4)
     {
         printf("Please input: raw_image gain_name out_name threads\n");
         return;
@@ -42,14 +42,20 @@ int main(int argc, char *argv[])
     raw_name=argv[1];
     gain_name=argv[2];
     out_name=argv[3];
-    threads=atoi(argv[4]);
+    //threads=atoi(argv[4]);
 
     file=fopen(raw_name,"rb");	
     mrc_read_head(file,inhead);
     fclose(file);
 
 //    printf("raw_name %s, out_name %s, gain_name %s\n",raw_name,out_name,gain_name);
-    defect_gain_correct(raw_name,gain_name,out_name,inhead,threads);
+    defect_gain_correct(raw_name,gain_name,out_name,inhead,0);
+	/*
+	free(raw_name);
+	free(out_name);
+	free(gain_name);
+	*/
+	return 0;
 }
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads)
@@ -174,7 +180,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 	//defect correction for points
 	finish=clock();
-	printf("gain time %d \n",finish-start);
+	printf("gain time %d s \n",(finish-start)/CLOCKS_PER_SEC);
 
 	fclose(input);
 	fclose(gain_f);
@@ -299,7 +305,7 @@ __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src, l
 	//__threadfence()
 	return;
 }
-__global__ void mutiplier_kernel_tpye_f(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){//execute all those mutiplications of type_f data
+__global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){//execute all those mutiplications of type_f data
 	//execute all those mutiplications of type_c data
 	long index=0; 
 	//long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
