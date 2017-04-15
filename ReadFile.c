@@ -19,7 +19,7 @@ int mrc_read_head(FILE *fin, MrcHeader *head) {
 	if (ftell(fin) != 0)
 		rewind(fin);
 	//if(ftello64(fin)!=0)rewind(fin);
-	fread(head, (sizeof(MrcHeader) + head->next), 1, fin);
+	fread(head, (sizeof(MrcHeader) + head->next), 1, fin); //HAZARD? without initializing head->next?
 
 	if (!(head->cmap[0] == 'M' && head->cmap[1] == 'A' && head->cmap[2] == 'P')) {
 		printf(
