@@ -15,11 +15,12 @@
 #define UNIT_N 1024*1024
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, int src_size);
+int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, long int src_size);
 
 __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
+void mutiplier_kernel_test(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n);
 
 int main(int argc, char *argv[])
 {
@@ -207,6 +208,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 		//fwrite(&coor_xy[n],sizeof(float),1,output);
 		fwrite(coor_xy,sizeof(float),size_x*size_y*slice_n,output);
 		}
+		printf("entrice written: %ld\n", size_x*size_y*slice_n);
+		printf("head length: %d\n", (sizeof(MrcHeader)+head->next));
 	finish=clock();
 	printf("write_time %d \n",finish-start);
 
@@ -223,7 +226,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 /**********************/
 
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, int src_size){
+int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, long int src_size){
 	//set up cuda 
 	cudaSetDevice(1);	
 	void *device_coord=NULL;
@@ -237,13 +240,13 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
 	//data transfer to device
 	cudaMemcpy( device_src, source, sizeof(char*)*src_size, cudaMemcpyHostToDevice );
-	cudaMemcpy( device_gain, gain_l, size_x*size_y, cudaMemcpyHostToDevice );
+	cudaMemcpy( device_gain, gain_l, sizeof(float)*size_x*size_y, cudaMemcpyHostToDevice );
 
 	//activate kerneld
 	switch(type){
 		case 0://c
 			mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
-
+			//mutiplier_kernel_test( coord_l, gain_l, source, size_x, size_y, slice_n );
 			break;
 		case 1://s
 			mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
@@ -259,7 +262,8 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 			exit(1);
 	}
 	//data transfer from device
-	cudaMemcpy( coord_l, device_coord, size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
+	cudaMemcpy( coord_l, device_coord, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
+	//cudaMemcpy( coord_l, device_coord, size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
 	//cudaMemcpy( gain_l, device_gain, size_x*size_y,cudaMemcpyDeviceToHost );
 	
 	//clean up
@@ -282,7 +286,7 @@ __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, lo
 			return;
 		}
 		slice_c = (index*unit_n+i)%(size_x*size_y);
-		coord[index*unit_n+i] = (*(unsigned char*)(((unsigned char*)src)+index*unit_n+i))*gain[slice_c];
+		coord[index*unit_n+i] = (*(((unsigned char*)src)+index*unit_n+i))*gain[slice_c];
 	}
 	//__threadfence()
 	return;
@@ -300,7 +304,7 @@ __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src, l
 			return;
 		}
 		slice_c = (index*unit_n+i)%(size_x*size_y);
-		coord[index*unit_n+i] = (*(short *)(((short*)src)+index*unit_n+i))*gain[slice_c];
+		coord[index*unit_n+i] = (*(((short*)src)+index*unit_n+i))*gain[slice_c];
 	}
 	//__threadfence()
 	return;
@@ -318,8 +322,35 @@ __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src, lo
 			return;
 		}
 		slice_c = (index*unit_n+i)%(size_x*size_y);
-		coord[index*unit_n+i] = (*(float *)(((float*)src)+index*unit_n+i))*gain[slice_c];
+		coord[index*unit_n+i] = (*(((float*)src)+index*unit_n+i))*gain[slice_c];
 	}
 	//__threadfence()
+	return;
+}
+
+void mutiplier_kernel_test(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){
+	///////////////////////////////
+	printf("Activating kernel test\n");
+	//execute all those mutiplications of type_c data
+	long index=0; 
+	//long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
+	//long unit_n = UNIT_N;
+	long unit_n = size_x*size_y*slice_n;
+	//index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
+	long slice_c=0;
+
+	for (int i=0; i<unit_n; i++){
+		
+		if (index*unit_n + i >= size_x*size_y*slice_n ){ //boundary check
+			return;
+		}
+		
+		slice_c = (index*unit_n+i)%(size_x*size_y);
+		//slice_c = (i)%(size_x*size_y);
+		coord[index*unit_n+i] = (*(((unsigned char*)src)+index*unit_n+i))*gain[slice_c];
+		//coord[i] = (*(((unsigned char*)src)+i))*gain[slice_c];
+	}
+	//__threadfence()
+	printf("Kernel test done\n");
 	return;
 }
