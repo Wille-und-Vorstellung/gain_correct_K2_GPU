@@ -17,7 +17,6 @@
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
 int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, long int src_size);
 
-__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, char* src, long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
@@ -221,7 +220,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	printf("free time %d \n",finish-start);
 	printf("Defect and gain correction finished!\n");
 
-	printf("En Taro Tassadar!!!\n");
+	printf("En Taro Tassaddar!!!\n");
 	return 0;
 }
 
@@ -233,40 +232,21 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	void *device_coord=NULL; //potential: change all to double
 	void *device_gain=NULL;
 	void *device_src=NULL;
-	//long *d_x=NULL, *d_y=NULL,*d_n=NULL;
+	long *d_x=NULL, *d_y=NULL,*d_n=NULL;
 	//void *temp_coord=NULL;
 	//void *temp_gain=NULL;
-	cudaError_t f1, f2, f3;
-
-	printf("Initialize allocation.\n");
-	printf("Required total: %ld \n", sizeof(float)*size_x*size_y*slice_n + sizeof(float)*size_x*size_y + sizeof(char*)*src_size);
-	printf("Required each: %ld - %ld - %ld \n", sizeof(float)*size_x*size_y*slice_n, sizeof(float)*size_x*size_y, sizeof(char*)*src_size);
-	f1 = cudaMalloc( (void **)&device_coord,  sizeof(float)*size_x*size_y*slice_n  );
-	f2 = cudaMalloc( (void **)&device_gain,  sizeof(float)*size_x*size_y );
-	f3 = cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
-	//GRAM allocation check
-	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess ){
-		printf("cuda memory allocation failed: %s - %s - %s - \n", f1, f2, f3);
-		exit(4);
-	}
 	
-	/*
 	cudaMalloc( (void **)&device_coord,  sizeof(float)*size_x*size_y*slice_n  );
 	cudaMalloc( (void **)&device_gain,  sizeof(float)*size_x*size_y );
 	cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
-	*/
-	printf("Allocation done.\n");
-	printf("status: %s - %s - %s - \n", f1, f2, f3);
 	/*
 	cudaMalloc( (void **)&d_x, sizeof(long) );
 	cudaMalloc( (void **)&d_y, sizeof(long) );
 	cudaMalloc( (void **)&d_n, sizeof(long) );
 	*/
 	//data transfer to device
-	printf("Initialize Memcpy host->device\n");
 	cudaMemcpy( device_src, source, sizeof(char*)*src_size, cudaMemcpyHostToDevice );
 	cudaMemcpy( device_gain, gain_l, sizeof(float)*size_x*size_y, cudaMemcpyHostToDevice );
-	printf("Done Memcpy host->device\n");
 	/*
 	cudaMemcpy( d_x, &size_x, sizeof(long), cudaMemcpyHostToDevice);
 	cudaMemcpy( d_y, &size_y, sizeof(long), cudaMemcpyHostToDevice);
@@ -277,11 +257,8 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 		case 0://c
 			printf("waypoint c\n");
 			//mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, *d_x, *d_y, *d_n );
-			//mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
-			//mutiplier_kernel_type_c<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
-			mutiplier_kernel_type_c_exp<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, (char*)device_src, size_x, size_y, slice_n );
+			mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
 			//mutiplier_kernel_test( coord_l, gain_l, source, size_x, size_y, slice_n );
-			printf("C out\n");
 			break;
 		case 1://s
 			mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
@@ -296,9 +273,6 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 			printf("Well well, Houston, we have some problem....\n");
 			exit(1);
 	}
-	//thread synchronization 
-	cudaThreadSynchronize();
-	printf("Sync Done\n");
 	//data transfer from device
 	cudaMemcpy( coord_l, device_coord, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
 	//cudaMemcpy( coord_l, device_coord, size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
@@ -313,67 +287,29 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	cudaFree( d_y );
 	cudaFree( d_n );
 	*/
-	printf("Dispatcher out\n");
 	return 117;
 }
-
-__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, char* src, long size_x, long size_y, long slice_n){
-	//execute all those mutiplications of type_c data
-	long long index=0; 
-	//long unit_n = (size_x*size_y*slice_n/(32*64))+1;
-	//long unit_n = UNIT_N;
-	long unit_n = (size_x*size_y*slice_n);
-	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
-	long slice_c=0;
-
-	printf("index check: %d\n ", index);
-	printf("Size check: %d \n", size_x*size_y*slice_n);
-	printf("unit_n check: %d \n", unit_n);
-
-	for (int i=0; i<unit_n; i++){
-		printf("head-> %d\n", i);
-		if (index*unit_n + i >= size_x*size_y*slice_n ){ //boundary check
-			printf("X: %d", index*unit_n + i);
-			return;
-		}
-		printf("progress: %d \n", i);
-		//slice_c = (index*unit_n+i)%(size_x*size_y);
-		coord[index*unit_n+i] = (src[index*unit_n+i] * gain[slice_c]);
-		printf("tail-> %d\n", i);
-	}
-	//__threadfence()
-	printf("Kernel out\n");
-	return;
-}
-
-
 
 __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){
 	//execute all those mutiplications of type_c data
 	long index=0; 
-	//long unit_n = (size_x*size_y*slice_n/(32*64))+1;
+	long unit_n = (size_x*size_y*slice_n/(32*64))+1;
 	//long unit_n = UNIT_N;
-	long unit_n = (size_x*size_y*slice_n);
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long slice_c=0;
 
-	printf("index %d\n ", index);
-	printf("Size check: %d \n", size_x*size_y*slice_n);
-	printf("unit_n check: %d \n", unit_n);
+	//printf("Size check: %d ", size_x*size_y*slice_n);
+	//printf("unit_n check: %d ", unit_n);
 
 	for (int i=0; i<unit_n; i++){
-		printf("head %d\n", i);
 		if (index*unit_n + i >= size_x*size_y*slice_n ){ //boundary check
 			printf("X: %d", index*unit_n + i);
 			return;
 		}
-		printf("progress: %d \n", i);
-		//slice_c = (index*unit_n+i)%(size_x*size_y);
+		slice_c = (index*unit_n+i)%(size_x*size_y);
 		coord[index*unit_n+i] = (float)(*(unsigned char*)(((unsigned char*)src)+index*unit_n+i)) * gain[slice_c];
-		printf("tail %d\n", i);
 	}
 	//__threadfence()
-	printf("Kernel out\n");
 	return;
 }
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){//execute all those mutiplications of type_s data
