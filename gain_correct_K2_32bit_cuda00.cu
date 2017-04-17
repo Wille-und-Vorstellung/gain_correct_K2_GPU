@@ -7,17 +7,21 @@
 #define LINE 1024
 #define NAME 1024
 #include "time.h"
-//#include "omp.h"
+#include "omp.h"
 #include "cuda_runtime.h"
 
-#define GRID_BLOCK 32 
-#define BLOCK_SIZE 64
-#define UNIT_N (1024*1024)
+#define GRID_BLOCK 64
+#define BLOCK_SIZE 128
+#define GTHREAD_N ( GRID_BLOCK * BLOCK_SIZE )
+#define GIGA 1073741824
+#define MP_THREAD 10
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, long int src_size);
+int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type);
 
-__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, char* src, long size_x, long size_y, long slice_n);
+__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, long long, long long, long long);
+void mutiplier_kernel_type_c_exp_test(float *coord, float *gain, long long total_s, long long single_s, long long unit_n);
+
 __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
@@ -51,7 +55,7 @@ int main(int argc, char *argv[])
     fclose(file);
 
 //    printf("raw_name %s, out_name %s, gain_name %s\n",raw_name,out_name,gain_name);
-    defect_gain_correct(raw_name,gain_name,out_name,inhead,0);
+    defect_gain_correct(raw_name,gain_name,out_name,inhead, MP_THREAD );
 	/*
 	free(raw_name);
 	free(out_name);
@@ -72,7 +76,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	FILE *input,*output,*gain_f, *temp_head;
 	char *input_byte_c;short *input_byte_s;float *input_byte_f;short *input_byte_u;
 	srand((unsigned) time(NULL));
-	void *source =NULL;
+	//void *source =NULL;
 
 	//open input output and gain file
 	printf("Start defect and gain correction|\ninput %s output %s gain %s\n",fin,fout,gain);
@@ -127,17 +131,17 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 	switch(file_type)
                 {
-                case 0:size_bit=1;input_byte_c=(char*)malloc(sizeof(char*)*(input_size-1024));fread(input_byte_c,size_bit,(input_size-1024)/size_bit,input);
-				source = input_byte_c;
+                case 0:size_bit=1;input_byte_c=(char*)malloc(sizeof(char)*(input_size-1024));fread(input_byte_c,size_bit,(input_size-1024)/size_bit,input);
+				//source = input_byte_c;
 				break;
-                case 1:size_bit=2;input_byte_s=(short*)malloc(sizeof(char*)*(input_size-1024));fread(input_byte_s,size_bit,(input_size-1024)/size_bit,input);
-				source = input_byte_s;
+                case 1:size_bit=2;input_byte_s=(short*)malloc(sizeof(char)*(input_size-1024));fread(input_byte_s,size_bit,(input_size-1024)/size_bit,input);
+				//source = input_byte_s;
 				break;
-                case 2:size_bit=4;input_byte_f=(float*)malloc(sizeof(char*)*(input_size-1024));fread(input_byte_f,size_bit,(input_size-1024)/size_bit,input);
-				source = input_byte_f;
+                case 2:size_bit=4;input_byte_f=(float*)malloc(sizeof(char)*(input_size-1024));fread(input_byte_f,size_bit,(input_size-1024)/size_bit,input);
+				//source = input_byte_f;
 				break;
-                case 6:size_bit=2;input_byte_u=(short*)malloc(sizeof(char*)*(input_size-1024));fread(input_byte_u,size_bit,(input_size-1024)/size_bit,input);
-				source = input_byte_u;
+                case 6:size_bit=2;input_byte_u=(short*)malloc(sizeof(char)*(input_size-1024));fread(input_byte_u,size_bit,(input_size-1024)/size_bit,input);
+				//source = input_byte_u;
 				break;
                 default:printf("File type error!");
                 }
@@ -148,7 +152,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	float badcut=6.0;
 	long int num_gain=0;
 	int defect_num=0;
-	clock_t start,finish;
+	clock_t start,finish, mid;
 
 	long int total_num=0,gain_num=0,gain_m=0;
 	
@@ -160,29 +164,31 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	finish=clock();
 	printf("read gain_time %d \n",finish-start);
 	start=clock();
-	//#pragma omp parallel for num_threads(threads) private(gain_num)
+
+	#pragma omp parallel for num_threads(threads) private(gain_num)
 	//#pragma omp parallel for schedule(dynamic)
-	/*
-		for(n=0; n<size_x*size_y*slice_n; n++)
-			{
+	for(n=0; n<size_x*size_y*slice_n; n++){
 			gain_num=n%(size_x*size_y);
-                        switch(file_type)
-                                {
-                                case 0:coor_xy[n]=(*(unsigned char*)(input_byte_c+n));coor_xy[n]=(coor_xy[n])*(gain_xy[gain_num]);break;
-                                case 1:coor_xy[n]=(*(short*)(input_byte_s+n));coor_xy[n]=(coor_xy[n])*(gain_xy[gain_num]);break;
-                                case 2:coor_xy[n]=(*(float*)(input_byte_f+n));coor_xy[n]=(coor_xy[n])*(gain_xy[gain_num]);break;
-                                case 6:coor_xy[n]=(*(short*)(input_byte_u+n));coor_xy[n]=(coor_xy[n])*(gain_xy[gain_num]);break;
-                                default:printf("File type error!\n");
-                                }
-			
-			}
-	*/
+            switch(file_type){
+                case 0:coor_xy[n]=(*(unsigned char*)(input_byte_c+n));
+				break;
+                case 1:coor_xy[n]=(*(short*)(input_byte_s+n));
+				break;
+                case 2:coor_xy[n]=(*(float*)(input_byte_f+n));
+				break;
+                case 6:coor_xy[n]=(*(short*)(input_byte_u+n));
+				break;
+                default:printf("File type error!\n");
+            }
+	}
+
+	mid=clock();
 	int indicator=0;
-	indicator=dispatcher_gpu( coor_xy, gain_xy, size_x, size_y, slice_n, file_type, source, input_size-1024 );
+	indicator=dispatcher_gpu( coor_xy, gain_xy, size_x, size_y, slice_n, file_type );
 
 	//defect correction for points
 	finish=clock();
-	printf("gain time %d s \n",(finish-start)/CLOCKS_PER_SEC);
+	printf("gain time: omp %ds, GPU %ds, total %ds  \n",(mid-start)/CLOCKS_PER_SEC, (finish-mid)/CLOCKS_PER_SEC, (finish-start)/CLOCKS_PER_SEC);
 
 	fclose(input);
 	fclose(gain_f);
@@ -227,26 +233,29 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 /**********************/
 
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type, void* source, long int src_size){
+int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type){
 	//set up cuda 
-	cudaSetDevice(1);	
+	cudaSetDevice(3);	
 	void *device_coord=NULL; //potential: change all to double
 	void *device_gain=NULL;
-	void *device_src=NULL;
 	//long *d_x=NULL, *d_y=NULL,*d_n=NULL;
 	//void *temp_coord=NULL;
 	//void *temp_gain=NULL;
-	cudaError_t f1, f2, f3;
+	cudaError_t f1, f2;
+
+	long long total_s=0, single_s=0, unit_n=0;
+	single_s = size_x * size_y;
+	total_s = single_s * slice_n;
 
 	printf("Initialize allocation.\n");
-	printf("Required total: %ld \n", sizeof(float)*size_x*size_y*slice_n + sizeof(float)*size_x*size_y + sizeof(char*)*src_size);
-	printf("Required each: %ld - %ld - %ld \n", sizeof(float)*size_x*size_y*slice_n, sizeof(float)*size_x*size_y, sizeof(char*)*src_size);
-	f1 = cudaMalloc( (void **)&device_coord,  sizeof(float)*size_x*size_y*slice_n  );
-	f2 = cudaMalloc( (void **)&device_gain,  sizeof(float)*size_x*size_y );
-	f3 = cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
+	printf("Required total(GB): %ld \n", (sizeof(float)*total_s + sizeof(float)*single_s)/GIGA);
+	printf("Required each: %ld -- %ld \n", sizeof(float)*total_s, sizeof(float)*single_s);
+	f1 = cudaMalloc( (void **)&device_coord,  sizeof(float)*total_s  );
+	f2 = cudaMalloc( (void **)&device_gain,  sizeof(float)*single_s );
+	//f3 = cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
 	//GRAM allocation check
-	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess ){
-		printf("cuda memory allocation failed: %s - %s - %s - \n", f1, f2, f3);
+	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+		printf("cuda memory allocation failed: %s -- %s \n", f1, f2);
 		exit(4);
 	}
 	
@@ -256,7 +265,7 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	cudaMalloc( (void **)&device_src, sizeof(char*)*src_size );
 	*/
 	printf("Allocation done.\n");
-	printf("status: %s - %s - %s - \n", f1, f2, f3);
+	printf("status: %s -- %s \n", f1, f2);
 	/*
 	cudaMalloc( (void **)&d_x, sizeof(long) );
 	cudaMalloc( (void **)&d_y, sizeof(long) );
@@ -264,50 +273,62 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	*/
 	//data transfer to device
 	printf("Initialize Memcpy host->device\n");
-	cudaMemcpy( device_src, source, sizeof(char*)*src_size, cudaMemcpyHostToDevice );
+	
+	/* Kernel validation
+	cudaMemcpy( device_coord, coord_l, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyHostToDevice );
 	cudaMemcpy( device_gain, gain_l, sizeof(float)*size_x*size_y, cudaMemcpyHostToDevice );
+	*/
+	
 	printf("Done Memcpy host->device\n");
 	/*
 	cudaMemcpy( d_x, &size_x, sizeof(long), cudaMemcpyHostToDevice);
 	cudaMemcpy( d_y, &size_y, sizeof(long), cudaMemcpyHostToDevice);
 	cudaMemcpy( d_n, &slice_n, sizeof(long), cudaMemcpyHostToDevice);
 	*/
-	//activate kerneld
+	//activate kernel
+	
 	switch(type){
 		case 0://c
 			printf("waypoint c\n");
-			//mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, *d_x, *d_y, *d_n );
-			//mutiplier_kernel_type_c<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
-			//mutiplier_kernel_type_c<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
-			mutiplier_kernel_type_c_exp<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, (char*)device_src, size_x, size_y, slice_n );
-			//mutiplier_kernel_test( coord_l, gain_l, source, size_x, size_y, slice_n );
+			//mutiplier_kernel_type_c_exp<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
+
+			//unit_n = total_s;
+			//mutiplier_kernel_type_c_exp<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
+
+			////Kernel validation
+			
+			unit_n = total_s;
+			mutiplier_kernel_type_c_exp_test( coord_l, gain_l, total_s, single_s, unit_n);
+			
 			printf("C out\n");
 			break;
 		case 1://s
-			mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
+			//mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
 			break;
 		case 2://f
-			mutiplier_kernel_type_f<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
+			//mutiplier_kernel_type_f<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );
 			break;
 		case 6://u
-			mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
+			//mutiplier_kernel_type_su<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, device_src, size_x, size_y, slice_n );			
 			break;
 		default:
-			printf("Well well, Houston, we have some problem....\n");
+			printf("Well...Houston, we've got some problem...\n");
 			exit(1);
 	}
 	//thread synchronization 
 	cudaThreadSynchronize();
 	printf("Sync Done\n");
 	//data transfer from device
+	/* Kernel validation
 	cudaMemcpy( coord_l, device_coord, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
+	*/
 	//cudaMemcpy( coord_l, device_coord, size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
 	//cudaMemcpy( gain_l, device_gain, size_x*size_y,cudaMemcpyDeviceToHost );
 	
 	//clean up
 	cudaFree( device_coord );
 	cudaFree( device_gain );
-	cudaFree( device_src );
+	//cudaFree( device_src );
 	/*
 	cudaFree( d_x );
 	cudaFree( d_y );
@@ -317,28 +338,31 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	return 117;
 }
 
-__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, char* src, long size_x, long size_y, long slice_n){
+__global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, long long total_s, long long single_s, long long unit_n){
 	//execute all those mutiplications of type_c data
 	long long index=0; 
-	//long unit_n = (size_x*size_y*slice_n/(32*64))+1;
+	//long long unit_n = (size_x*size_y*slice_n/( GTHREAD_N ))+1;
+	//long long unit_n = unit_s;
 	//long unit_n = UNIT_N;
-	long unit_n = (size_x*size_y*slice_n);
+	//long unit_n = (size_x*size_y*slice_n);
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long slice_c=0;
 
 	printf("index check: %d\n ", index);
-	printf("Size check: %d \n", size_x*size_y*slice_n);
+	//printf("Size check: %d \n", size_x*size_y*slice_n);
+	printf("Size check: %d \n", total_s);
 	printf("unit_n check: %d \n", unit_n);
 
 	for (int i=0; i<unit_n; i++){
 		printf("head-> %d\n", i);
-		if (index*unit_n + i >= size_x*size_y*slice_n ){ //boundary check
+		if (index*unit_n + i >= total_s ){ //boundary check
 			printf("X: %d", index*unit_n + i);
 			return;
 		}
 		printf("progress: %d \n", i);
 		//slice_c = (index*unit_n+i)%(size_x*size_y);
-		coord[index*unit_n+i] = (src[index*unit_n+i] * gain[slice_c]);
+		slice_c = (index*unit_n+i)%(single_s);
+		coord[index*unit_n+i] = (coord[index*unit_n+i] * gain[slice_c]);
 		printf("tail-> %d\n", i);
 	}
 	//__threadfence()
@@ -346,7 +370,37 @@ __global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, char* src
 	return;
 }
 
+void mutiplier_kernel_type_c_exp_test(float *coord, float *gain, long long total_s, long long single_s, long long unit_n){
+	//execute all those mutiplications of type_c data
+	long long index=0; 
+	//long long unit_n = (size_x*size_y*slice_n/( GTHREAD_N ))+1;
+	//long long unit_n = unit_s;
+	//long unit_n = UNIT_N;
+	//long unit_n = (size_x*size_y*slice_n);
+	//index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
+	long slice_c=0;
 
+	printf("index check: %d\n ", index);
+	//printf("Size check: %d \n", size_x*size_y*slice_n);
+	printf("Size check: %d \n", total_s);
+	printf("unit_n check: %d \n", unit_n);
+
+	for (int i=0; i<unit_n; i++){
+		//printf("head-> %d\n", i);
+		if (index*unit_n + i >= total_s ){ //boundary check
+			printf("X: %d", index*unit_n + i);
+			return;
+		}
+		//printf("progress: %d \n", i);
+		//slice_c = (index*unit_n+i)%(size_x*size_y);
+		slice_c = (index*unit_n+i)%(single_s);
+		coord[index*unit_n+i] = (coord[index*unit_n+i] * gain[slice_c]);
+		//printf("tail-> %d\n", i);
+	}
+	//__threadfence()
+	printf("Kernel out\n");
+	return;
+}
 
 __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){
 	//execute all those mutiplications of type_c data
@@ -379,8 +433,8 @@ __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, lo
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){//execute all those mutiplications of type_s data
 	//execute all those mutiplications of type_c data
 	long index=0; 
-	//long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
-	long unit_n = UNIT_N;
+	long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
+	//long unit_n = UNIT_N;
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long slice_c=0;
 
@@ -397,8 +451,8 @@ __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src, l
 __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n){//execute all those mutiplications of type_f data
 	//execute all those mutiplications of type_c data
 	long index=0; 
-	//long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
-	long unit_n = UNIT_N;
+	long unit_n = size_x*size_y*slice_n/GRID_BLOCK;
+	//long unit_n = UNIT_N;
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long slice_c=0;
 
