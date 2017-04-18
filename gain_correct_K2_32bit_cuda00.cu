@@ -10,11 +10,13 @@
 #include "omp.h"
 #include "cuda_runtime.h"
 
-#define GRID_BLOCK 64
-#define BLOCK_SIZE 128
+#define GRID_BLOCK 20
+#define BLOCK_SIZE 256
 #define GTHREAD_N ( GRID_BLOCK * BLOCK_SIZE )
 #define GIGA 1073741824
 #define MP_THREAD 10
+#define G_DEVICE_1 3
+#define G_DEVICE_2 0
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
 int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type);
@@ -274,10 +276,15 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	//data transfer to device
 	printf("Initialize Memcpy host->device\n");
 	
-	/* Kernel validation
-	cudaMemcpy( device_coord, coord_l, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyHostToDevice );
-	cudaMemcpy( device_gain, gain_l, sizeof(float)*size_x*size_y, cudaMemcpyHostToDevice );
-	*/
+	///* Kernel validation
+	f1 = cudaMemcpy( device_coord, coord_l, sizeof(float)*total_s, cudaMemcpyHostToDevice );
+	f2 = cudaMemcpy( device_gain, gain_l, sizeof(float)*single_s, cudaMemcpyHostToDevice );
+	//GRAM allocation check
+	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+		printf("cudaMemcpy failed(H->D): %s -- %s \n", f1, f2);
+		exit(5);
+	}
+	//*/
 	
 	printf("Done Memcpy host->device\n");
 	/*
@@ -286,20 +293,20 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	cudaMemcpy( d_n, &slice_n, sizeof(long), cudaMemcpyHostToDevice);
 	*/
 	//activate kernel
-	
+	unit_n = (total_s/( GTHREAD_N )) + 1; 
 	switch(type){
 		case 0://c
 			printf("waypoint c\n");
-			//mutiplier_kernel_type_c_exp<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
-
-			//unit_n = total_s;
-			//mutiplier_kernel_type_c_exp<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
-
+			mutiplier_kernel_type_c_exp<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
+			/*
+			unit_n = total_s;
+			mutiplier_kernel_type_c_exp<<< 1, 1 >>>( (float*)device_coord, (float*)device_gain, total_s, single_s, unit_n );
+			*/
 			////Kernel validation
-			
+			/*
 			unit_n = total_s;
 			mutiplier_kernel_type_c_exp_test( coord_l, gain_l, total_s, single_s, unit_n);
-			
+			*/
 			printf("C out\n");
 			break;
 		case 1://s
@@ -319,9 +326,14 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	cudaThreadSynchronize();
 	printf("Sync Done\n");
 	//data transfer from device
-	/* Kernel validation
-	cudaMemcpy( coord_l, device_coord, sizeof(float)*size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
-	*/
+	///* Kernel validation
+	f1 = cudaMemcpy( coord_l, device_coord, sizeof(float)*total_s, cudaMemcpyDeviceToHost );
+	//GRAM allocation check
+	if ( f1 != cudaSuccess ){
+		printf("cudaMemcpy failed(D->H): %s \n", f1 );
+		exit(6);
+	}
+	//*/
 	//cudaMemcpy( coord_l, device_coord, size_x*size_y*slice_n, cudaMemcpyDeviceToHost );
 	//cudaMemcpy( gain_l, device_gain, size_x*size_y,cudaMemcpyDeviceToHost );
 	
@@ -348,25 +360,25 @@ __global__ void mutiplier_kernel_type_c_exp(float *coord, float *gain, long long
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long slice_c=0;
 
-	printf("index check: %d\n ", index);
+	//printf("index check: %d\n ", index);
 	//printf("Size check: %d \n", size_x*size_y*slice_n);
-	printf("Size check: %d \n", total_s);
-	printf("unit_n check: %d \n", unit_n);
+	//printf("Size check: %d \n", total_s);
+	//printf("unit_n check: %d \n", unit_n);
 
 	for (int i=0; i<unit_n; i++){
-		printf("head-> %d\n", i);
+		//printf("head-> %d\n", i);
 		if (index*unit_n + i >= total_s ){ //boundary check
-			printf("X: %d", index*unit_n + i);
+			//printf("X: %d", index*unit_n + i); //POTENTIAL: return a counter through pointer
 			return;
 		}
-		printf("progress: %d \n", i);
+		//printf("progress: %d \n", i);
 		//slice_c = (index*unit_n+i)%(size_x*size_y);
 		slice_c = (index*unit_n+i)%(single_s);
 		coord[index*unit_n+i] = (coord[index*unit_n+i] * gain[slice_c]);
-		printf("tail-> %d\n", i);
+		//printf("tail-> %d\n", i);
 	}
 	//__threadfence()
-	printf("Kernel out\n");
+	//printf("Kernel out\n");
 	return;
 }
 

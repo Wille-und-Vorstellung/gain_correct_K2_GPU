@@ -17,7 +17,7 @@
 #define MP_THREAD 10
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type);
+int dispatcher_gpu_split(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type);
 
 __global__ void mutiplier_kernel_type_c_exp_split(float *coord, float *gain, long long, long long, long long, long long);
 void mutiplier_kernel_type_c_exp_test(float *coord, float *gain, long long total_s, long long single_s, long long unit_n);
@@ -46,7 +46,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	
 	//revise input image header then written for output file
 	int size_x=5000;
-	int size_y=200;
+	int size_y=2000;
 	int slice_n=2;
     int indicator=0;
 	int result=0;
@@ -69,7 +69,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 		}
 	}
 
-	indicator=dispatcher_gpu( coor_xy, gain_xy, size_x, size_y, slice_n, 0 );
+	indicator=dispatcher_gpu_split( coor_xy, gain_xy, size_x, size_y, slice_n, 0 );
 
 	for(int i=0; i<size_x*size_y*slice_n; i++){
 		if ( i < size_x*size_y && coor_xy[i] != 2 ) {
@@ -88,7 +88,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 /**********************/
 
-int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type){
+int dispatcher_gpu_split(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type){
 	//set up cuda 
 	cudaSetDevice(0);	
 	void *device_coord_1=NULL, *device_coord_2=NULL;
@@ -150,7 +150,7 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 	
 
 
-			printf("waypoint C\n");
+			printf("waypoint Serpent\n");
 
 			mutiplier_kernel_type_c_exp_split<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (float*)device_gain_1, total_s/2, single_s, unit_n, 0 ); 
 			//HAZARD: slice_c might be a problem... + a offset, yes offset will do.BUT NOT FULLY VERIFIED YET
@@ -165,7 +165,7 @@ int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, lon
 			mutiplier_kernel_type_c_exp_split<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2, (float*)device_gain_1, total_s/2+left_over, single_s, unit_n, offset );
 
 
-			printf("C out\n");
+			printf("Serpent out\n");
 
 
 

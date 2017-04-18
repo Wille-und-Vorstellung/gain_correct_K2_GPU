@@ -10,8 +10,8 @@
 #include "omp.h"
 #include "cuda_runtime.h"
 
-#define GRID_BLOCK 1
-#define BLOCK_SIZE 1
+#define GRID_BLOCK 16
+#define BLOCK_SIZE 32
 #define GTHREAD_N ( GRID_BLOCK * BLOCK_SIZE )
 #define GIGA 1073741824
 #define MP_THREAD 10
@@ -26,6 +26,11 @@ __global__ void mutiplier_kernel_type_c(float *coord, float *gain, void* src, lo
 __global__ void mutiplier_kernel_type_su(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
 __global__ void mutiplier_kernel_type_f(float *coord, float *gain, void* src,long size_x, long size_y, long slice_n);
 void mutiplier_kernel_test(float *coord, float *gain, void* src, long size_x, long size_y, long slice_n);
+
+/////talon_split
+__global__ void mutiplier_kernel_type_c_exp_split(float *coord, float *gain, long long, long long, long long, long long);
+int dispatcher_gpu_split(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type);
+/////
 
 int main(int argc, char *argv[])
 {
@@ -186,7 +191,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	mid=clock();
 	int indicator=0;
 	printf("pointer check(pre-invoke): %p -- %p \n", coor_xy, gain_xy);
-	indicator=dispatcher_gpu( coor_xy, gain_xy, size_x, size_y, slice_n, file_type );
+	indicator=dispatcher_gpu_split( coor_xy, gain_xy, size_x, size_y, slice_n, file_type );
 
 	//defect correction for points
 	finish=clock();
@@ -233,6 +238,181 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	return 0;
 }
 
+
+////talon_split
+/**********************/
+int dispatcher_gpu_split(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type){
+	//set up cuda 
+	cudaSetDevice(0);	
+	void *device_coord_1=NULL, *device_coord_2=NULL;
+	void *device_gain_1=NULL, *device_gain_2=NULL;
+	int left_over = 0;
+	cudaError_t f1, f2, f3, f4;
+	long long total_s=0, single_s=0, unit_n=0;
+	long long offset = 0; 
+
+	single_s = size_x * size_y;
+	total_s = single_s * slice_n;
+	if ( total_s%2 != 0 ){
+		left_over = 1;
+	}
+	offset = total_s/2;
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	printf("Initialize allocation.\n");
+	printf("Required total(GB): %ld \n", (sizeof(float)*total_s + sizeof(float)*single_s)/GIGA);
+	printf("Required each: %ld -- %ld \n", sizeof(float)*total_s, sizeof(float)*single_s);
+	f1 = cudaMalloc( (void **)&device_coord_1,  sizeof(float)*total_s/2  );
+	f2 = cudaMalloc( (void **)&device_gain_1,  sizeof(float)*single_s );
+	f3 = cudaMalloc( (void **)&device_coord_2,  sizeof(float)*(total_s/2 + left_over)  );
+	//f4 = cudaMalloc( (void **)&device_gain_2,  sizeof(float)*single_s );
+	//GRAM allocation check
+	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess ){
+		printf("cuda memory allocation failed: %s -- %s -- %s \n", f1, f2, f3 );
+		exit(4);
+	}
+	printf("Allocation done.\n");
+	printf("status: %s -- %s -- %s \n", f1, f2, f3);
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	//data transfer to device
+	printf("Initialize Memcpy: host->device\n");
+	
+	///* Kernel validation
+	f1 = cudaMemcpy( device_coord_1, coord_l, sizeof(float)*total_s/2, cudaMemcpyHostToDevice );
+	f2 = cudaMemcpy( device_gain_1, gain_l, sizeof(float)*single_s, cudaMemcpyHostToDevice );
+	f3 = cudaMemcpy( device_coord_2, (coord_l + total_s/2), sizeof(float)*(total_s/2 + left_over), cudaMemcpyHostToDevice );
+	//GRAM allocation check
+	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+		printf("cudaMemcpy failed(H->D): %s -- %s \n", f1, f2);
+		exit(5);
+	}
+	//*/
+	printf("Memcpy Done: host->device\n");
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	
+	//activate kernel
+	unit_n = (total_s/(2*( GTHREAD_N ))) + 1; 
+	
+
+
+			printf("waypoint Serpent\n");
+
+			mutiplier_kernel_type_c_exp_split<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (float*)device_gain_1, total_s/2, single_s, unit_n, 0 ); 
+			//HAZARD: slice_c might be a problem... + a offset, yes offset will do.BUT NOT FULLY VERIFIED YET
+			//can switch cpu here and remove the sync below
+			///*
+			f1 = cudaThreadSynchronize();
+			if ( f1 != cudaSuccess ){
+				printf("cuda sync(mid-way) failed: %s \n", f1 );
+				exit(12);
+			}
+			//*/
+			mutiplier_kernel_type_c_exp_split<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2, (float*)device_gain_1, total_s/2+left_over, single_s, unit_n, offset );
+
+
+			printf("Serpent out\n");
+
+
+
+	//thread synchronization 
+	f1 = cudaThreadSynchronize();
+	if ( f1 != cudaSuccess ){
+		printf("cuda sync failed: %s \n", f1 );
+		exit(9);
+	}
+	printf("Sync Done\n");
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	//data transfer from device
+	///* Kernel validation
+	printf("Initialize Memcpy: device->host\n");
+	
+	f1 = cudaMemcpy( coord_l, device_coord_1, sizeof(float)*total_s/2, cudaMemcpyDeviceToHost );
+	printf("Memcpy: device->host, half-way through\n");
+	////Narrator: replace cudaMemcpy manually,if cudaMemcpy doesn't work for too long addresses
+	f2 = cudaMemcpy( (coord_l + total_s/2), device_coord_2, sizeof(float)*(total_s/2 + left_over), cudaMemcpyDeviceToHost );
+	/*
+	for (long long i=0; i < sizeof(float)*total_s/2 + left_over; i++){
+		coord_l[i+total_s/2] = device_coord_2[i];
+	}
+	*/
+	//Narrator: if manual copy doesn't work either, then we declare another agent and do a manual cascade.
+
+	//GRAM allocation check
+	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+		printf("cudaMemcpy failed(D->H): %s -- %s \n", f1, f2 );
+		exit(6);
+	}
+	printf("Memcpy Done: device->host\n");
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	
+	//clean up
+	printf("Initialize cudaFree\n");
+	f1 = cudaFree( device_coord_1 );
+	f2 = cudaFree( device_gain_1 );
+	f3 = cudaFree( device_coord_2 );
+	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+		printf("cudaFree failed: %s -- %s \n", f1, f2);
+		exit(7);
+	}
+	printf("cudaFree Done\n");
+	/*
+	printf("pointer check(host): %p -- %p \n", coord_l, gain_l);
+	printf("pointer check(device): %p -- %p \n", device_coord, device_gain);
+	*/
+	
+	printf("Dispatcher out\n");
+	return 117;
+}
+
+__global__ void mutiplier_kernel_type_c_exp_split(float *coord, float *gain, long long total_s, long long single_s, long long unit_n, long long offset){
+	//execute all those mutiplications of type_c data
+	long long index=0;
+	long long i = 0; 
+	//long long unit_n = (size_x*size_y*slice_n/( GTHREAD_N ))+1;
+	//long long unit_n = unit_s;
+	//long unit_n = UNIT_N;
+	//long unit_n = (size_x*size_y*slice_n);
+	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
+	long long slice_c=0;
+
+	printf("index check: %d\n ", index);
+	//printf("Size check: %d \n", size_x*size_y*slice_n);
+	printf("Size check: %d \n", total_s);
+	printf("unit_n check: %d \n", unit_n);
+	printf("input check: %p -- %p \n", coord, gain);
+
+	for (i=0; i<unit_n; i++){
+		//printf("head-> %d\n", i);
+		if (index*unit_n + i >= total_s ){ //boundary check
+			printf("X: %d\n", index*unit_n + i); //POTENTIAL: return a counter through pointer
+			return;
+		}
+		//printf("progress: %d \n", i);
+		//slice_c = (index*unit_n+i)%(size_x*size_y);
+		slice_c = (index*unit_n+i+offset)%(single_s);
+		coord[index*unit_n+i] = (coord[index*unit_n+i] * gain[slice_c]);
+		//printf("tail-> %d\n", i);
+	}
+	//__threadfence()
+	printf("Kernel out: %d\n", i);
+	return;
+}
+
+////talon_split
 /**********************/
 
 int dispatcher_gpu(float *coord_l, float *gain_l , long size_x, long size_y, long slice_n, int type){
