@@ -389,16 +389,16 @@ __global__ void mutiplier_kernel_type_c_exp_split(float *coord, float *gain, lon
 	index = blockDim.x*blockIdx.x + threadIdx.x;  //such fun
 	long long slice_c=0;
 
-	printf("index check: %d\n ", index);
+	//printf("index check: %d\n ", index);
 	//printf("Size check: %d \n", size_x*size_y*slice_n);
-	printf("Size check: %d \n", total_s);
-	printf("unit_n check: %d \n", unit_n);
-	printf("input check: %p -- %p \n", coord, gain);
+	//printf("Size check: %d \n", total_s);
+	//printf("unit_n check: %d \n", unit_n);
+	//printf("input check: %p -- %p \n", coord, gain);
 
 	for (i=0; i<unit_n; i++){
 		//printf("head-> %d\n", i);
 		if (index*unit_n + i >= total_s ){ //boundary check
-			printf("X: %d\n", index*unit_n + i); //POTENTIAL: return a counter through pointer
+			//printf("X: %d\n", index*unit_n + i); //POTENTIAL: return a counter through pointer
 			return;
 		}
 		//printf("progress: %d \n", i);
@@ -408,7 +408,7 @@ __global__ void mutiplier_kernel_type_c_exp_split(float *coord, float *gain, lon
 		//printf("tail-> %d\n", i);
 	}
 	//__threadfence()
-	printf("Kernel out: %d\n", i);
+	//printf("Kernel out: %d\n", i);
 	return;
 }
 
