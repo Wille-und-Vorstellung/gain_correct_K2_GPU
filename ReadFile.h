@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef FALSE
 #define FALSE       0           /*false for boolean*/

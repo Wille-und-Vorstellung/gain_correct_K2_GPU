@@ -299,8 +299,8 @@ int dispatcher_gpu_split(float *coord_l, float *gain_l , long size_x, long size_
 	*/
 	
 	//activate kernel
-	unit_n = (total_s/(2*( GTHREAD_N ))) + 1; 
-	
+	//unit_n = (total_s/(2*( GTHREAD_N ))) + 1; 
+	unit_n = ceil(total_s/(2.0*( GTHREAD_N ))); //NOTE: using 2.0 rather than 2 is essential, otherwise might lost accuracy BEFORE ceil() for total_s is long long type.
 
 
 			printf("waypoint Serpent\n");
