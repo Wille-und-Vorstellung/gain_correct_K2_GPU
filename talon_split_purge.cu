@@ -15,9 +15,11 @@
 #define GTHREAD_N ( GRID_BLOCK * BLOCK_SIZE )
 #define GIGA 1073741824
 #define MP_THREAD 10
-#define TEST_RUN true
+#define TEST_RUN false
 
-#define SIZE 2000 //debug only
+#define SIZE 2000 //debug only, alpha_test()
+#define B_SIZE 28125 // debug only, beta_test()
+#define B_GAIN_S 5625
 
 int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
 
@@ -29,15 +31,24 @@ float dispatcher_gpu_split_purge(float *coord_l, void *src, float *gain_l , long
 
 bool cudaErrorCheck( cudaError_t, int );
 
-bool alpha_test();
+bool alpha_test(); //type 2 input
+
+bool beta_test( int type = 0 ); //type 0, 1, 6
 
 int main(int argc, char *argv[]){
-	bool k = true;
+	bool k = true, h = true;
 	if ( TEST_RUN ){
-		k = alpha_test();
+		//k = alpha_test();
+		h = beta_test();
 		if ( k == false ){
-			printf("Failed\n");
+			printf("Alpha Failed \n");
+			return 1;
 		}
+		if ( h == false ){
+			printf( "Beta Failed \n" );
+			return 2;
+		}
+		printf( "Passed \n" );
 		return 0;
 	}
 
@@ -140,6 +151,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 	//read the input and gain file into memory
 	//note: the byte size(second parameter) is basen on the type of the file
+	printf( "--> Input Mrc type: %d \n", file_type );
+	printf("Before dispatch, statues: src_size - %d, size_x - %d, size_y - %d, slice_n %d \n", input_size-1024, size_x, size_y, slice_n );
 
 	switch(file_type)
                 {
@@ -164,7 +177,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	float badcut=6.0;
 	long int num_gain=0;
 	int defect_num=0;
-	clock_t start,finish, mid;
+	clock_t start = 0 ,finish = 0, mid = 0;
 
 	long int total_num=0,gain_num=0,gain_m=0;
 	
@@ -174,35 +187,16 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 		gain_xy[n]=(*(float*)(gain_byte+n))*10.0;
 		}
 	finish=clock();
-	printf("read gain_time %d \n",finish-start);
-	start=clock();
-	/*
-	#pragma omp parallel for num_threads(threads) private(gain_num)
-	//#pragma omp parallel for schedule(dynamic)
-	for(n=0; n<size_x*size_y*slice_n; n++){
-			gain_num=n%(size_x*size_y);
-            switch(file_type){
-                case 0:coor_xy[n]=(*(unsigned char*)(input_byte_c+n));
-				break;
-                case 1:coor_xy[n]=(*(short*)(input_byte_s+n));
-				break;
-                case 2:coor_xy[n]=(*(float*)(input_byte_f+n));
-				break;
-                case 6:coor_xy[n]=(*(short*)(input_byte_u+n));
-				break;
-                default:printf("File type error!\n");
-            }
-	}
-	*/
-
-
+	printf("read gain_time %ds \n",(finish-start)/CLOCKS_PER_SEC);
+	mid=clock();
+	
 	float indicator=0;
 	//printf("pointer check(pre-invoke): %p -- %p \n", coor_xy, gain_xy);
 	indicator=dispatcher_gpu_split_purge( coor_xy, source, gain_xy, size_x, size_y, slice_n, file_type, input_size-1024 );
 
 	//defect correction for points
 	finish=clock();
-	printf("gain time: memcpy %ds, GPU %ds, total %ds  \n",(indicator)/CLOCKS_PER_SEC, (finish-mid)/CLOCKS_PER_SEC, (finish-start)/CLOCKS_PER_SEC);
+	printf( "gain time: memcpy %ds, calc %ds\n",(indicator)/CLOCKS_PER_SEC, (finish-mid)/CLOCKS_PER_SEC );
 
 	fclose(input);
 	fclose(gain_f);
@@ -223,10 +217,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	//write head for output file
 	fwrite(head,(sizeof(MrcHeader)+head->next),1,output);
 	start=clock();
-	//for(n=0;n<size_x*size_y*slice_n;n++)
 		{
-		//fwrite(&coor_xy[n],sizeof(unsigned char),1,output);
-		//fwrite(&coor_xy[n],sizeof(float),1,output);
+		
 		fwrite(coor_xy,sizeof(float),size_x*size_y*slice_n,output);
 		}
 		printf("entrice written: %ld\n", size_x*size_y*slice_n);
@@ -238,7 +230,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	free(coor_xy);
 	fclose(output);
 	finish=clock();
-	printf("free time %d \n",finish-start);
+	printf("free time %ds \n",(finish-start)/CLOCKS_PER_SEC);
 	printf("Defect and gain correction finished!\n");
 
 	printf("En Taro Tassadar!!!\n");
@@ -249,11 +241,18 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 ////
 /**********************/
 float dispatcher_gpu_split_purge( float *coord_l, void *src,float *gain_l , long size_x, long size_y, long slice_n, int type, long src_size ){
+	////NOTICE: src_size = sizeof( 'src_entry' )*size_x*size_y*slice_n
+	//type check	
+	if ( type != 0 && type != 1 && type != 2 && type != 6 ) {
+		printf( "dispatcher_gpu_split_purge: wrong input Mrc type: %d \n", type );
+		return -1;
+	}
+
 	//set up cuda 
 	cudaSetDevice(0);	
 	void *device_coord_1=NULL, *device_coord_2=NULL;
 	void *device_gain_1=NULL, *device_gain_2=NULL;
-	char *device_src=NULL;
+	void *device_src=NULL;
 	int left_over = 0;
 	cudaError_t f1, f2, f3, f4;
 	long long total_s=0, single_s=0, unit_n=0;
@@ -272,23 +271,22 @@ float dispatcher_gpu_split_purge( float *coord_l, void *src,float *gain_l , long
 	printf("Required total(GB): %ld \n", (sizeof(float)*total_s + sizeof(float)*single_s)/GIGA);
 	printf("Required each: %ld -- %ld \n", sizeof(float)*total_s, sizeof(float)*single_s);
 	f1 = cudaMalloc( (void **)&device_coord_1,  sizeof(float)*total_s/2  );
-	f2 = cudaMalloc( (void **)&device_src,  sizeof(char)*src_size );
+	f2 = cudaMalloc( (void **)&device_src, src_size );
+	f4 = cudaMemcpy( device_src, src, src_size, cudaMemcpyHostToDevice );
+
 	f3 = cudaMalloc( (void **)&device_coord_2,  sizeof(float)*(total_s/2 + left_over)  );
 	//GRAM allocation check
-	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess ){
+	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess || f4 != cudaSuccess ){
 		printf("cuda memory allocation failed: %s -- %s -- %s \n", f1, f2, f3 );
 		exit(4);
 	}
 	printf("Allocation done.\n");
-	//begin{mem transfer}
-			/*
-			mutiplier_kernel_split_purge<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (float*)device_gain_1, total_s/2, single_s, unit_n, 0 ); 
-			*/
-			//total, unit, step
+	
+	printf("Before any Kernel, statues: leftover - %d, total_s - %d, offset - %d, src_size - %d, size_x - %d, size_y - %d, slice_n %d \n", left_over, total_s, offset, src_size, size_x, size_y, slice_n );
 	t1 = clock();
 	if (type != 2){ /////////this branch is yet to be reviewed
-			printf(" type: %f \n", type);
-			long unit_temp = ceil(total_s/(2*( GTHREAD_N )));
+			printf(" type: %d \n", type);
+			long unit_temp = ceil(total_s/(2.0*( GTHREAD_N )));
 			int step=0;
 			long offset_temp=0;
 			switch( type ){
@@ -307,9 +305,11 @@ float dispatcher_gpu_split_purge( float *coord_l, void *src,float *gain_l , long
 			}
 
 			offset_temp = (total_s/2)*step;
-			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, device_src, total_s/2, unit_temp, step);
+			printf("offest_temp: %d, unit_temp: %d, step: %d \n", offset_temp, unit_temp, step );
+			//printf("--offest_temp: %f, unit_temp: %f, step: %f \n", (float)offset_temp, (float)unit_temp, (float)step );
+			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (char *)device_src, total_s/2, unit_temp, step);
 
-			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2, (device_src + offset_temp), total_s/2 + left_over, unit_temp, step);
+			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2,((char*)device_src + offset_temp), total_s/2 + left_over, unit_temp, step);
 
 			f1 = cudaThreadSynchronize();
 			cudaErrorCheck(f1, 321);
@@ -325,7 +325,7 @@ float dispatcher_gpu_split_purge( float *coord_l, void *src,float *gain_l , long
 	t2 = clock();
 	ret = (t2-t1);
 	f2 = cudaFree(device_src);
-	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
+	if ( f2 != cudaSuccess ){
 		printf("purge finish-off failed: %s \n", f1 );
 		exit(121);
 	}
@@ -367,8 +367,6 @@ float dispatcher_gpu_split_purge( float *coord_l, void *src,float *gain_l , long
 
 
 			printf("Serpent out\n");
-
-
 
 	//thread synchronization 
 	f1 = cudaThreadSynchronize();
@@ -418,11 +416,13 @@ __global__ void mutiplier_kernel_split_purge(float *coord, float *gain, long lon
 	long long slice_c=0;
 
 	for (i=0; i<unit_n; i++){
-		if (index*unit_n + i >= total_s ){ 
+		if (index*unit_n + i >= total_s ){
 			return;
 		}
 		slice_c = (index*unit_n+i+offset)%(single_s);
+		//printf("In M kernel: %d, gain %d at %d \n", coord[index*unit_n+i], gain[slice_c], index*unit_n+i );
 		coord[index*unit_n+i] = (coord[index*unit_n+i] * gain[slice_c]);
+		//printf("In M kernel: %d \n", coord[index*unit_n+i] );
 	}
 	
 	return;
@@ -437,7 +437,10 @@ __global__ void transfer_kernel( float *coord, char *src, long long total_s, lon
 		if ( index*unit_n+i >= total_s ){
 			return;
 		}
+
 		coord[index*unit_n+i] = *(src + (index*unit_n+i)*step);
+		//printf("In transfer kernel: %d at \n", coord[index*unit_n+i], index*unit_n+i );
+
 	}
 
 	return;
@@ -496,8 +499,8 @@ bool alpha_test(){
 	printf( "sum_check: %f \n", sum_check );
 	printf("Misfit, first-half: %d; last-half: %d \n", misfit_fh, misfit_lh );
 	log_f = fopen( log_name, "w");
-	ori_f = fopen( "tsp_ori.log", "w" );
-	out_f = fopen( "tsp_out.log", "w" );
+	ori_f = fopen( "tsp_alpha_ori.log", "w" );
+	out_f = fopen( "tsp_alpha_out.log", "w" );
 
 	for ( j=0; j<SIZE ; j++){
 		fprintf( log_f, "%.0f ", des[j]-2*source[j] );
@@ -510,7 +513,77 @@ bool alpha_test(){
 	printf( "--" );
 	return flag;
 }
+bool beta_test( int type ){
+	if ( type != 0 && type != 1 && type != 6 ){
+		printf("Wrong type: %d \n", type);
+		return false;
+	}
 
+	char *log_name = "tsp_beta_test.log";
+	FILE *log_f = NULL, *ori_f = NULL, *out_f = NULL;
+	
+	char source[B_SIZE] = {0};
+	float gain[B_GAIN_S] = {0};
+	float des[B_SIZE] = {0};
+	float sum_check = 0;
+
+	int x_size = 10;
+	int slice_N = 2;
+
+	long i=0, j=0;
+	bool flag = true;
+	int misfit_fh = 0, misfit_lh = 0;
+
+	//initialization
+	for (j = 0; j < B_GAIN_S; j++ ){
+		gain[j] = 2;
+	}
+
+	for ( j=0; j<B_SIZE; j++ ) {
+		if ( j < B_SIZE/2 ){
+			
+			source[j] = '!';
+		}
+		else{
+			source[j] = '#';
+		}
+		des[j] = -1;
+	}
+
+	/*
+	float dispatcher_gpu_split_purge(float *coord_l, void *src, float *gain_l , long size_x, long size_y, long slice_n, int type, long );
+	*/
+	//dispatcher_gpu_split_purge( des, source, gain, B_SIZE/(slice_N*x_size), x_size, slice_N, type, B_SIZE*sizeof(char) );
+	dispatcher_gpu_split_purge( des, source, gain, 75, 75, 5, type, 75*75*5*sizeof(char) );
+	
+	//validation
+	for ( i=0; i<B_SIZE; i++ ) {
+		if (  i< B_SIZE/2 && (int)des[i] != 66){
+			flag = false;
+			misfit_fh += 1;
+		}
+		else if ( i >= B_SIZE/2 && (int)des[i] != 70 ){
+			flag = false;
+			misfit_lh += 1;
+		}
+	}
+	
+	printf("Misfit, first-half: %d, last-half: %d \n", misfit_fh, misfit_lh );
+	log_f = fopen( log_name, "w");
+	ori_f = fopen( "tsp_beta_ori.log", "w" );
+	out_f = fopen( "tsp_beta_out.log", "w" );
+
+	for ( j=0; j<B_SIZE ; j++){
+		fprintf( log_f, "%.0f ", des[j]-2*(int)source[j] );
+		fprintf( ori_f, "%c ", source[j] );
+		fprintf( out_f, "%d ", (int)des[j] );
+	}
+	fclose( log_f );
+	fclose( ori_f );
+	fclose( out_f );
+	printf( "--" );
+	return flag;
+}
 
 ////
 /**********************/
