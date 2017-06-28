@@ -35,6 +35,9 @@ bool alpha_test(); //type 2 input
 bool beta_test( int type = 0 ); //type 0, 1, 6
 
 int main(int argc, char *argv[]){
+	clock_t global_start_ts = 0, global_end_ts = 0; // ts -> time stamp 
+	global_start_ts = clock();
+
 	bool k = true, h = true;
 	if ( TEST_RUN ){
 		//k = alpha_test();
@@ -75,6 +78,9 @@ int main(int argc, char *argv[]){
     fclose(file);
 
     defect_gain_correct(raw_name,gain_name,out_name,inhead, MP_THREAD );
+	global_end_ts = clock();
+
+	printf( "Total time cost: %ds \n", (global_end_ts - global_start_ts)/CLOCKS_PER_SEC );
 	return 0;
 }
 
@@ -192,7 +198,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	fwrite(head,(sizeof(MrcHeader)+head->next),1,output);
 	start=clock();
 		
-	fwrite(coor_xy,sizeof(float),size_x*size_y*slice_n,output);
+	//fwrite(coor_xy,sizeof(float),size_x*size_y*slice_n,output);
+	fwrite(coor_xy, sizeof(float)*size_x*size_y*slice_n, 1, output);
 	//POTENTIAL(?): change to write all content at one time e.g.( coor_xy, sizeof(float)*size_x*size_y*slice_n, output )
 		
 	printf("entrice written: %ld\n", size_x*size_y*slice_n);
@@ -246,10 +253,10 @@ float dispatcher_gpu_syndicate( float *coord_l, void *src,float *gain_l , long s
 	//set up cuda 
 	cudaSetDevice( GPU_DEVICE_0 );
 	void *device_coord_1=NULL, *device_coord_2=NULL;
-	void *device_gain_1=NULL;
-	void *device_src=NULL;
+	void *device_gain_1=NULL, *device_gain_2=NULL;
+	void *device_src_1 = NULL, *device_src_2 = NULL;
 	int left_over = 0;
-	cudaError_t f1, f2, f3, f4;
+	cudaError_t f1, f2, f3, f4, f5, f6;
 	long long total_s=0, single_s=0, unit_n=0;
 	long long offset = 0; 
 	clock_t t1=0, t2=0;
@@ -263,15 +270,16 @@ float dispatcher_gpu_syndicate( float *coord_l, void *src,float *gain_l , long s
 	offset = total_s/2;
 	
 	printf("Initialize allocation.\n");
-	printf("Required total(GB): %ld \n", (sizeof(float)*total_s + sizeof(float)*single_s)/GIGA);
-	printf("Required each: %ld -- %ld \n", sizeof(float)*total_s, sizeof(float)*single_s);
+	cudaSetDevice( GPU_DEVICE_0 );
 	f1 = cudaMalloc( (void **)&device_coord_1,  sizeof(float)*total_s/2  );
-	f2 = cudaMalloc( (void **)&device_src, src_size );
-	f4 = cudaMemcpy( device_src, src, src_size, cudaMemcpyHostToDevice );
-	f3 = cudaMalloc( (void **)&device_coord_2,  sizeof(float)*(total_s/2 + left_over) );
-
+	f2 = cudaMalloc( (void **)&device_src_1, src_size );
+	f3 = cudaMemcpy( device_src_1, src, src_size, cudaMemcpyHostToDevice );
+	cudaSetDevice( GPU_DEVICE_1 );
+	f4 = cudaMalloc( (void **)&device_coord_2,  sizeof(float)*(total_s/2 + left_over) );
+	f5 = cudaMalloc( (void **)&device_src_2, src_size );
+	f6 = cudaMemcpy( device_src_2, src, src_size, cudaMemcpyHostToDevice );
 	//GRAM allocation check
-	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess || f4 != cudaSuccess ){
+	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess || f4 != cudaSuccess || f5 != cudaSuccess || f6 != cudaSuccess ){
 		printf("cuda memory allocation failed: %s -- %s -- %s \n", f1, f2, f3 );
 		exit(4);
 	}
@@ -286,14 +294,18 @@ float dispatcher_gpu_syndicate( float *coord_l, void *src,float *gain_l , long s
 			offset_temp = (total_s/2)*step;
 			printf("offest_temp: %d, unit_temp: %d, step: %d \n", offset_temp, unit_temp, step );
 
-			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (char *)device_src, total_s/2, unit_temp, step);
-			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2,((char*)device_src + offset_temp), total_s/2 + left_over, unit_temp, step);
+			cudaSetDevice( GPU_DEVICE_0 );
+			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (char *)device_src_1, total_s/2, unit_temp, step);
+			cudaSetDevice( GPU_DEVICE_1 );
+			transfer_kernel<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2,((char*)device_src_2 + offset_temp), total_s/2 + left_over, unit_temp, step);
 
 			f1 = cudaThreadSynchronize();
 			cudaErrorCheck(f1, 321);
 	}else{
 		printf("type: 2\n");
+		cudaSetDevice( GPU_DEVICE_0 );
 		f1 = cudaMemcpy( device_coord_1, src, sizeof(float)*total_s/2, cudaMemcpyHostToDevice );
+		cudaSetDevice( GPU_DEVICE_1 );
 		f3 = cudaMemcpy( device_coord_2, (((float*)src) + total_s/2), sizeof(float)*(total_s/2 + left_over), cudaMemcpyHostToDevice );
 		if ( f1 != cudaSuccess || f3 != cudaSuccess ){
 			printf("purge finish-off failed: %s \n", f1 );
@@ -302,59 +314,66 @@ float dispatcher_gpu_syndicate( float *coord_l, void *src,float *gain_l , long s
 	}
 	t2 = clock();
 	ret = (t2-t1);
-	f2 = cudaFree(device_src);
-	if ( f2 != cudaSuccess ){
-		printf("purge finish-off failed: %s \n", f1 );
+	cudaSetDevice( GPU_DEVICE_0 );
+	f1 = cudaFree(device_src_1);
+	cudaSetDevice( GPU_DEVICE_1 );
+	f2 = cudaFree(device_src_2);
+	if ( f2 != cudaSuccess || f2 != cudaSuccess ){
+		printf("finish-off failed: %s \n", f1 );
 		exit(121);
 	}
 
 	//data transfer to device
 	printf("Initialize Memcpy: host->device\n");
+	cudaSetDevice( GPU_DEVICE_0 );
 	f4 = cudaMalloc( (void **)&device_gain_1,  sizeof(float)*single_s );
 	f2 = cudaMemcpy( device_gain_1, gain_l, sizeof(float)*single_s, cudaMemcpyHostToDevice );
 	//GRAM allocation check
 	if (  f2 != cudaSuccess || f4 != cudaSuccess ){
-		printf("cudaMemcpy failed(H->D): %s -- %s \n", f2, f4);
+		printf("cudaMemcpy failed(H->D): %s -- %s，device: %d \n", f2, f4, GPU_DEVICE_0 );
+		exit(5);
+	}
+	cudaSetDevice( GPU_DEVICE_1 );
+	f4 = cudaMalloc( (void **)&device_gain_2,  sizeof(float)*single_s );
+	f2 = cudaMemcpy( device_gain_2, gain_l, sizeof(float)*single_s, cudaMemcpyHostToDevice );
+	//GRAM allocation check
+	if (  f2 != cudaSuccess || f4 != cudaSuccess ){
+		printf("cudaMemcpy failed(H->D): %s -- %s, device: %d \n", f2, f4, GPU_DEVICE_1 );
 		exit(5);
 	}
 	printf("Memcpy Done: host->device\n");
 	
 	//activate kernel
-	unit_n = ceil(total_s/(2.0*( GTHREAD_N ))); 
+	unit_n = ceil(total_s/(2.0*( GTHREAD_N ))); //take notice that this "2.0" is very important to cast the calc into float
 	printf("Insider: the unit_n is %d \n", unit_n);	
 
 			printf("waypoint Serpent\n");
+			cudaSetDevice( GPU_DEVICE_0 );
 			mutiplier_kernel_syndicate<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_1, (float*)device_gain_1, total_s/2, single_s, unit_n, 0 ); 
 			//HAZARD: slice_c might be a problem... + a offset, yes offset will do.BUT NOT FULLY VERIFIED YET
-			//can switch cpu here and remove the sync below
-			///*
-			f1 = cudaThreadSynchronize();
-			if ( f1 != cudaSuccess ){
-				printf("cuda sync(mid-way) failed: %s \n", f1 );
-				exit(12);
-			}
-			//*/
-			mutiplier_kernel_syndicate<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2, (float*)device_gain_1, total_s/2+left_over, single_s, unit_n, offset );
+			cudaSetDevice( GPU_DEVICE_1 );
+			mutiplier_kernel_syndicate<<< GRID_BLOCK, BLOCK_SIZE >>>( (float*)device_coord_2, (float*)device_gain_2, total_s/2+left_over, single_s, unit_n, offset );
 			printf("Serpent out\n");
 
 	//thread synchronization 
+	/*
 	f1 = cudaThreadSynchronize();
 	if ( f1 != cudaSuccess ){
 		printf("cuda sync failed: %s \n", f1 );
 		exit(9);
 	}
 	printf("Sync Done\n");
-	
+	*/
 	//data transfer from device
 	///* Kernel validation
 	printf("Initialize Memcpy: device->host\n");
-	
+	cudaSetDevice( GPU_DEVICE_0 );
 	f1 = cudaMemcpy( coord_l, device_coord_1, sizeof(float)*total_s/2, cudaMemcpyDeviceToHost );
 	printf("Memcpy: device->host, half-way through\n");
 	////Narrator: replace cudaMemcpy manually,if cudaMemcpy doesn't work for too long addresses
+	cudaSetDevice( GPU_DEVICE_1 );
 	f2 = cudaMemcpy( (coord_l + total_s/2), device_coord_2, sizeof(float)*(total_s/2 + left_over), cudaMemcpyDeviceToHost );
 	//Narrator: if manual copy doesn't work either, then we declare another agent and do a manual cascade.
-
 	//GRAM allocation check
 	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
 		printf("cudaMemcpy failed(D->H): %s -- %s \n", f1, f2 );
@@ -364,13 +383,17 @@ float dispatcher_gpu_syndicate( float *coord_l, void *src,float *gain_l , long s
 	
 	//clean up
 	printf("Initialize cudaFree\n");
+	cudaSetDevice( GPU_DEVICE_0 );
 	f1 = cudaFree( device_coord_1 );
 	f2 = cudaFree( device_gain_1 );
+	cudaSetDevice( GPU_DEVICE_1 );
 	f3 = cudaFree( device_coord_2 );
-	if ( f1 != cudaSuccess || f2 != cudaSuccess ){
-		printf("cudaFree failed: %s -- %s \n", f1, f2);
+	f4 = cudaFree( device_gain_2 );
+	if ( f1 != cudaSuccess || f2 != cudaSuccess || f3 != cudaSuccess || f4 != cudaSuccess ){
+		printf( "cudaFree failed: %s -- %s -- %s -- %s\n", f1, f2, f3, f4 );
 		exit(7);
 	}
+
 	printf("cudaFree Done\n");	
 	printf("Dispatcher out\n");
 	return ret;
@@ -441,7 +464,7 @@ bool alpha_test(){
 	/*
 	float dispatcher_gpu_syndicate(float *coord_l, void *src, float *gain_l , long size_x, long size_y, long slice_n, int type, long );
 	*/
-	dispatcher_gpu_syndicate( des, source, gain, SIZE/(2*x_size), x_size, 2, 2, SIZE*4 );
+	dispatcher_gpu_syndicate( des, source, gain, SIZE/(2*x_size), x_size, 2, 2/*,SIZE*4*/ );
 	
 	//validation
 	for ( i=0; i<SIZE; i++ ) {
@@ -507,7 +530,7 @@ bool beta_test( int type ){
 	/*
 	float dispatcher_gpu_syndicate(float *coord_l, void *src, float *gain_l , long size_x, long size_y, long slice_n, int type, long );
 	*/
-	dispatcher_gpu_syndicate( des, source, gain, 75, 75, 5, type, 75*75*5*sizeof(char) );
+	dispatcher_gpu_syndicate( des, source, gain, 75, 75, 5, type/*, 75*75*5*sizeof(char)*/ );
 	
 	//validation
 	for ( i=0; i<B_SIZE; i++ ) {

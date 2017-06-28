@@ -34,6 +34,9 @@ bool cudaErrorCheck( cudaError_t, int );
 bool beta_test( int type = 0 ); //type 0
 
 int main(int argc, char *argv[]){
+	clock_t start_ts = 0, end_ts = 0;
+
+	start_ts = clock();
 	bool h = true;
 	if ( TEST_RUN ){
 		h = beta_test();
@@ -77,6 +80,9 @@ int main(int argc, char *argv[]){
 	free(out_name);
 	free(gain_name);
 	*/
+	end_ts = clock();
+	printf( "Total times: %ds \n", (end_ts - start_ts)/CLOCKS_PER_SEC );
+	
 	return 0;
 }
 
@@ -212,7 +218,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	start=clock();
 		{
 		
-		fwrite(coor_xy,sizeof(char),size_x*size_y*slice_n,output);
+		//fwrite(coor_xy,sizeof(char),size_x*size_y*slice_n,output);
+		fwrite(coor_xy, sizeof(char)*size_x*size_y*slice_n, 1, output);
 		}
 		printf("entrice written: %ld\n", size_x*size_y*slice_n);
 		printf("head length: %d\n", (sizeof(MrcHeader)+head->next));
