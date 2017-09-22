@@ -2,20 +2,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 #include "ReadFile.h"
 #include "ReadFile.c"
 #define LINE 1024
 #define NAME 1024
 #include "time.h"
-#include "omp.h"
 #include "cuda_runtime.h"
 
-//inherited from syndicate_IV, use 8bit output(i.e. coor_xy), version syndicate_IV_I
+/*
+Version:
+	talon_syndicate_V
+Description:
+	1. Based on syndicate_IV_I(aka 8bit_syndicate).
+	2. Fixed potential accuracy lost brought by unitype kernel, which turns out to be an error that only works on type 0 mrc input.
+	3. Add multi-threading for GPUs.
+	4. Parameterize the Boost_Factor( as did in talon_odyssey )
+	5. 
+*/
 
 #define GRID_BLOCK 16 //16
 #define BLOCK_SIZE 32 //32
 #define GTHREAD_N ( GRID_BLOCK * BLOCK_SIZE )
 #define GIGA 1073741824
+#define PARAMETER_N
 #define MP_THREAD 10
 #define TEST_RUN false
 
@@ -26,12 +36,26 @@
 #define GPU_DEVICE_0 0 
 #define GPU_DEVICE_1 1
 
-int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads);
+typedef struct{
+	int type;
+	int device_id;
+	void* mem_coord = NULL;
+	long start;  //close interval
+	long length; //open 
+}thread_bundle;
+
+int defect_gain_correct(char *fin, char *gain, char *fout, int threads);
 __global__ void multiplier_kernel_8bit_syndicate_unitype(char *coord, float *gain, char*, long long, long long, long long, long long, int);
 float dispatcher_gpu_8bit_syndicate(char *coord_l, void *src, float *gain_l , long size_x, long size_y, long slice_n, int type);
 bool cudaErrorCheck( cudaError_t, int );
 bool alpha_test(); //type 2 input
 bool beta_test( int type = 0 ); //type 0, 1, 6
+void kernel_thread_func( void * );
+
+__global__ void multiplier_kernel_type16(); // 2 byte for type 1, 6
+__global__ void multiplier_kernel_type0();	// 1 byte for type 0
+__global__ void multiplier_kernel_type2();	// 4 byte for type 2
+
 
 int main(int argc, char *argv[]){
 	clock_t global_start_ts = 0, global_end_ts = 0; // ts -> time stamp 
@@ -55,55 +79,56 @@ int main(int argc, char *argv[]){
 
     char *raw_name,*out_name,*gain_name;
     FILE *file;
-    MrcHeader *inhead;
-
+    
     raw_name=(char *)malloc(NAME*sizeof(char));
     out_name=(char *)malloc(NAME*sizeof(char));
     gain_name=(char *)malloc(NAME*sizeof(char));
 
-    inhead=(MrcHeader *)malloc(sizeof(MrcHeader));
-
-    if(argc!=4)
-    {
-        printf("Please input: raw_image gain_name out_name threads\n");
+    if( argc != PARAMETER_N ){
+        printf("Please input: raw_image gain_name out_name\n");
         return 1;
     }
+
     raw_name=argv[1];
     gain_name=argv[2];
     out_name=argv[3];
 
-    file=fopen(raw_name,"rb");	
-    mrc_read_head(file,inhead);
-    fclose(file);
-
-    defect_gain_correct(raw_name,gain_name,out_name,inhead, MP_THREAD );
+    defect_gain_correct(raw_name,gain_name,out_name, MP_THREAD );
 	global_end_ts = clock();
 
 	printf( "Total time cost: %ds \n", (global_end_ts - global_start_ts)/CLOCKS_PER_SEC );
 	return 0;
 }
 
-int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int threads){
-	float *gain_xy=NULL;
-	char *coor_xy=NULL;
+int defect_gain_correct(char *fin, char *gain, char *fout, int threads){
+	float *gain_xy = NULL;
+	char *coor_xy = NULL;
 	int size_bit;
-	long int n;
-	FILE *input,*output,*gain_f;
-	char *input_byte_c=NULL;short *input_byte_s=NULL;float *input_byte_f=NULL;short *input_byte_u=NULL;
-	srand((unsigned) time(NULL));
-	void *source =NULL;
+	long int n = 0;
+	FILE *input = NULL,*output = NULL,*gain_f = NULL;
+	char *input_byte_c = NULL;
+	short *input_byte_s = NULL;
+	float *input_byte_f = NULL;
+	short *input_byte_u = NULL;
+	void *source = NULL;
+	MrcHeader *head = NULL;
+	clock_t start = 0 ,finish = 0, mid = 0;
 
+	srand( (unsigned)time(NULL) );
 	//open input output and gain file
 	printf("Start defect and gain correction|\ninput %s output %s gain %s\n",fin,fout,gain);
-	input=fopen(fin,"rb");
-	gain_f=fopen(gain,"rb");
-
+	input = fopen( fin, "rb" );
+	gain_f = fopen( gain, "rb" );
+	//read MrcHeader
+	head = (MrcHeader *)malloc(sizeof(MrcHeader));
+    mrc_read_head(input,head);
+    rewind(input);
 	//revise input image header then written for output file
-	int size_x=head->nx;
-	int size_y=head->ny;
-	int slice_n=head->nz;
-    int file_type=head->mode;
-	head->mode=2;
+	int size_x = head->nx;
+	int size_y = head->ny;
+	int slice_n = head->nz;
+    int file_type = head->mode;
+	head->mode = 2;
     switch(file_type){
         case 0:	size_bit=1;
 				break;
@@ -133,10 +158,10 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 	//malloc memory for the file pointer
 	float *gain_byte=(float*)malloc(sizeof(char*)*(gain_f_size-1024));
 
-	printf("pointer check(pre-allocate): %p -- %p \n", coor_xy, gain_xy);
+	//printf("pointer check(pre-allocate): %p -- %p \n", coor_xy, gain_xy);
 	gain_xy=(float*)malloc(sizeof(float)*size_y*size_x);
 	coor_xy=(char*)malloc(sizeof(char)*size_y*size_x*slice_n);
-	printf("pointer check(post-allocate): %p -- %p \n", coor_xy, gain_xy);
+	//printf("pointer check(post-allocate): %p -- %p \n", coor_xy, gain_xy);
 
 	//read the input and gain file into memory
 	//note: the byte size(second parameter) is basen on the type of the file
@@ -160,10 +185,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
         default:
 				printf("File type error!");
     }
-
 	fread(gain_byte,sizeof(float),(gain_f_size-1024)/4,gain_f);
 
-	clock_t start = 0 ,finish = 0, mid = 0;
 	start=clock();
 	//set into place, not necesary but can save some trouble latter in dispatcher/kernel
 	for(n=0; n<size_x*size_y; n++){
@@ -182,7 +205,6 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 	fclose(input);
 	fclose(gain_f);
-	free(gain_byte);
 	switch(file_type){
         case 0:free(input_byte_c);break;
         case 1:free(input_byte_s);break;
@@ -208,6 +230,8 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 	start=clock();
 	free(coor_xy);
+	free(gain_xy);
+	free(gain_byte);
 	fclose(output);
 	finish=clock();
 	printf("free time %ds \n",(finish-start)/CLOCKS_PER_SEC);
@@ -220,7 +244,7 @@ int defect_gain_correct(char *fin, char *gain, char *fout, MrcHeader *head,int t
 
 ////
 /**********************/
-float dispatcher_gpu_8bit_syndicate( char *coord_l, void *src,float *gain_l , long size_x, long size_y, long slice_n, int type /*, long src_size */){
+float dispatcher_gpu_8bit_syndicate( char *coord_l, void *src,float *gain_l , long size_x, long size_y, long slice_n, int type ){
 	////NOTICE: src_size = sizeof( 'src_entry' )*size_x*size_y*slice_n
 	//type check
 	if ( type != 0 && type != 1 && type != 2 && type != 6 ) {
